@@ -1,0 +1,12 @@
+[Unit]
+Description=Fetch the Piyolog data feed twice daily
+
+[Timer]
+OnCalendar=*-*-* 00:15:00
+OnCalendar=*-*-* 12:15:00
+Persistent=true
+AccuracySec=1min
+Unit=piyolog-fetch.service
+
+[Install]
+WantedBy=timers.target

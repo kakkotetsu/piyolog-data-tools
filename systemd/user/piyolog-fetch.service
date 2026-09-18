@@ -1,0 +1,11 @@
+[Unit]
+Description=Archive the current Piyolog data-feed snapshot
+ConditionPathExists=%h/piyolog-data-tools/.env
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/piyolog-data-tools
+ExecStart=%h/piyolog-data-tools/fetch-piyolog.sh
+# The feed and its archive contain sensitive personal data.
+UMask=0077
+Nice=10
