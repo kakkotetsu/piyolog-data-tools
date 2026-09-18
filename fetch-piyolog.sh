@@ -16,10 +16,25 @@ command -v curl >/dev/null 2>&1 || fail "curl is required."
 command -v jq >/dev/null 2>&1 || fail "jq is required."
 [[ -f "$env_file" ]] || fail ".env was not found."
 
-# Do not source .env: this reads only the one value required by this script.
-feed_url=$(sed -n 's/^PIYOLOG_FEED_URL=//p' "$env_file" | head -n 1)
+# Do not source .env: read only the values this script uses.
+env_value() {
+  sed -n "s/^$1=//p" "$env_file" | head -n 1
+}
+
+feed_url=$(env_value PIYOLOG_FEED_URL)
 feed_url=${feed_url%$'\r'}
 [[ -n "$feed_url" ]] || fail "PIYOLOG_FEED_URL is not set in .env."
+
+# Proxy settings are optional.  Passing them only to curl also makes them work
+# when this script is run by a systemd user service with a minimal environment.
+curl_environment=()
+for proxy_name in HTTPS_PROXY HTTP_PROXY NO_PROXY; do
+  proxy_value=$(env_value "$proxy_name")
+  proxy_value=${proxy_value%$'\r'}
+  if [[ -n "$proxy_value" ]]; then
+    curl_environment+=("$proxy_name=$proxy_value")
+  fi
+done
 
 mkdir -p "$archive_dir"
 if ! mkdir "$lock_dir" 2>/dev/null; then
@@ -33,7 +48,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-curl --fail --silent --show-error --location \
+env "${curl_environment[@]}" curl --fail --silent --show-error --location \
   --connect-timeout 10 --max-time 30 \
   --output "$tmp_file" \
   "$feed_url"
