@@ -14,13 +14,14 @@ PIYOLOG_FEED_URL=https://feed.piyolog.com/v1/feed/24h/＜feed_id＞/＜secret＞
 
 `PIYOLOG_FEED_URL` の値は秘密情報です。空白や引用符を加えず、URLだけを設定してください。
 
-プロキシ環境では、必要に応じて `HTTPS_PROXY` を同じ `.env` に追加できます。
+プロキシ環境では、必要に応じて `HTTPS_PROXY` と `NO_PROXY` を同じ `.env` に追加できます。
 
 ```dotenv
 HTTPS_PROXY=http://proxy.example.com:8080
+NO_PROXY=localhost,127.0.0.1
 ```
 
-これらの値は `curl` の実行時にだけ適用されるため、手動実行・cron・systemd timerで共通して利用されます。
+これらの値は取得スクリプトの `curl` とVictoriaLogs同期スクリプトの通信時に適用されるため、手動実行・cron・systemd timerで共通して利用されます。
 
 VictoriaLogs連携を使う場合は、接続先を追加します。ローカルのDocker Compose構成では、既定値の `http://127.0.0.1:9428` でも動作します。
 

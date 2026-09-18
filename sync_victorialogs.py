@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sqlite3
 import sys
 from collections import Counter
@@ -55,6 +56,17 @@ def read_env_value(name: str, env_file: Path) -> str | None:
         if line.startswith(prefix):
             return line[len(prefix) :]
     return None
+
+
+def apply_proxy_settings(env_file: Path) -> None:
+    """Apply optional proxy settings from .env to urllib for this process."""
+    https_proxy = read_env_value("HTTPS_PROXY", env_file)
+    no_proxy = read_env_value("NO_PROXY", env_file)
+    if https_proxy:
+        # urllib gives lower-case variables precedence and uses this for HTTPS URLs.
+        os.environ["https_proxy"] = https_proxy
+    if no_proxy:
+        os.environ["no_proxy"] = no_proxy
 
 
 def canonical_json(value: Any) -> str:
@@ -215,6 +227,7 @@ def main() -> int:
         parser.error("--dry-run and --debug cannot be used together")
 
     env_file = PROJECT_DIR / ".env"
+    apply_proxy_settings(env_file)
     url = args.url or read_env_value("VICTORIALOGS_URL", env_file) or DEFAULT_VICTORIALOGS_URL
     bearer_token = read_env_value("VICTORIALOGS_BEARER_TOKEN", env_file)
     try:
