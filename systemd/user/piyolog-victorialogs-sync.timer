@@ -1,0 +1,12 @@
+[Unit]
+Description=Synchronize Piyolog records to VictoriaLogs twice daily
+
+[Timer]
+OnCalendar=*-*-* 00:25:00
+OnCalendar=*-*-* 12:25:00
+Persistent=true
+AccuracySec=1min
+Unit=piyolog-victorialogs-sync.service
+
+[Install]
+WantedBy=timers.target

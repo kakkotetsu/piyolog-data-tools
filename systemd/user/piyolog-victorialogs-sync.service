@@ -1,0 +1,12 @@
+[Unit]
+Description=Synchronize archived Piyolog records to VictoriaLogs
+ConditionPathExists=%h/piyolog-data-tools/.env
+ConditionPathExists=%h/piyolog-data-tools/.venv/bin/python
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/piyolog-data-tools
+ExecStart=%h/piyolog-data-tools/.venv/bin/python %h/piyolog-data-tools/sync_victorialogs.py
+# The feed archive, sync state and VictoriaLogs credentials contain sensitive data.
+UMask=0077
+Nice=10

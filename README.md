@@ -57,6 +57,19 @@ Python標準ライブラリだけで動作しますが、実行にはプロジ�
 
 通常実行が成功した後は、未送信または変更されたイベントだけが送信されます。通信失敗時は送信済み状態を更新しないため、次回に再送されます。
 
+systemd timerを使う場合、取得timerの10分後に同期timerを実行します。
+
+```bash
+cp systemd/user/piyolog-victorialogs-sync.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now piyolog-victorialogs-sync.timer
+```
+
+```bash
+systemctl --user list-timers piyolog-victorialogs-sync.timer
+journalctl --user -u piyolog-victorialogs-sync.service
+```
+
 ## 定期実行
 
 ### cron
