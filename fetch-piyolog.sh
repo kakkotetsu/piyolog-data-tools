@@ -25,16 +25,14 @@ feed_url=$(env_value PIYOLOG_FEED_URL)
 feed_url=${feed_url%$'\r'}
 [[ -n "$feed_url" ]] || fail "PIYOLOG_FEED_URL is not set in .env."
 
-# Proxy settings are optional.  Passing them only to curl also makes them work
+# The proxy setting is optional.  Passing it only to curl also makes it work
 # when this script is run by a systemd user service with a minimal environment.
 curl_environment=()
-for proxy_name in HTTPS_PROXY HTTP_PROXY NO_PROXY; do
-  proxy_value=$(env_value "$proxy_name")
-  proxy_value=${proxy_value%$'\r'}
-  if [[ -n "$proxy_value" ]]; then
-    curl_environment+=("$proxy_name=$proxy_value")
-  fi
-done
+https_proxy=$(env_value HTTPS_PROXY)
+https_proxy=${https_proxy%$'\r'}
+if [[ -n "$https_proxy" ]]; then
+  curl_environment+=("HTTPS_PROXY=$https_proxy")
+fi
 
 mkdir -p "$archive_dir"
 if ! mkdir "$lock_dir" 2>/dev/null; then
