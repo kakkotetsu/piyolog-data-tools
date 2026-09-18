@@ -2,6 +2,8 @@
 
 `fetch-piyolog.sh` は、`.env` の `PIYOLOG_FEED_URL` からぴよログのデータフィードを取得し、レスポンスを変更せず JSON ファイルとして保存します。
 
+フィードの作成方法、利用可能な取得期間、JSON仕様は[ぴよログ公式のデータフィードガイド](https://www.piyolog.com/app/piyolog/data_feed/ja/)を参照してください。
+
 ## 設定
 
 プロジェクト直下に `.env` を作成し、ぴよログアプリで発行したフィードURLを次の形式で設定します。
