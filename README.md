@@ -110,8 +110,8 @@ journalctl --user -u piyolog-victorialogs-sync.service
 
 ### Grafanaダッシュボード
 
-[`grafana/dashboards/piyolog-overview.json`](grafana/dashboards/piyolog-overview.json) は、記録数・授乳回数・おしっこ回数・種別ごとの時系列・体温・最新記録を表示するダッシュボードです。
+[`grafana/dashboards/piyolog-overview.json`](grafana/dashboards/piyolog-overview.json) は、記録数・授乳回数・おしっこ回数・離乳食とメモ・体温・最新記録を表示するダッシュボードです。
 
 Grafanaの **Dashboards** → **New** → **Import** からJSONファイルをアップロードし、VictoriaLogsデータソースを選択してimportしてください。JSONにはデータソースの固定UIDを含めていないため、環境ごとに同じ手順で利用できます。初期表示期間は直近24時間です。
 
-体温と種別ごとの時系列パネルはLogsQLの集計クエリを使います。イベントの内容は下部の「最新の記録」パネルで確認できます。
+離乳食パネルは選択期間内の記録を「日時」「メモ」の2列で表示します。日時はブラウザのタイムゾーンで表示し、メモなしの記録も空欄で表示します。体温は時系列グラフ、その他のイベントは下部の「最新の記録」パネルで確認できます。
