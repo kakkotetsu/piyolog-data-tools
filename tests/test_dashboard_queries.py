@@ -82,7 +82,26 @@ class DashboardStructureTests(unittest.TestCase):
                 time_filter = query.index("filter _time:[${__from:date:iso}, ${__to:date:iso}]")
                 self.assertLess(latest, time_filter)
                 if "type:" in query:
-                    self.assertLess(time_filter, query.index("type:"))
+                    # Sleep needs earlier transitions to infer the state at the
+                    # left edge; all other panels filter the selected range first.
+                    if panel["id"] == 7:
+                        self.assertLess(latest, query.index("type:"))
+                        self.assertLess(query.index("running_stats"), time_filter)
+                    else:
+                        self.assertLess(time_filter, query.index("type:"))
+
+    def test_sleep_timeline_colors_and_layout(self):
+        panel = PANELS[7]
+        self.assertEqual(panel["type"], "state-timeline")
+        self.assertEqual(panel["targets"][0]["queryType"], "stats")
+        self.assertEqual(panel["options"]["showValue"], "never")
+        self.assertTrue(panel["options"]["mergeValues"])
+        mapping = panel["fieldConfig"]["defaults"]["mappings"][0]["options"]
+        self.assertEqual(mapping["night"]["color"], "#5794F2")
+        self.assertEqual(mapping["nap"]["color"], "#F2495C")
+        self.assertEqual(mapping["awake"]["color"], "rgba(0, 0, 0, 0)")
+        self.assertEqual(mapping["unknown"]["color"], "rgba(0, 0, 0, 0)")
+        self.assertLessEqual(panel["gridPos"]["y"] + panel["gridPos"]["h"], PANELS[6]["gridPos"]["y"])
 
     def test_meal_table_keeps_time_and_memo(self):
         panel = PANELS[4]
@@ -114,6 +133,87 @@ class DashboardIntegrationTests(unittest.TestCase):
         if endpoint == "query":
             return [json.loads(line) for line in text.splitlines() if line]
         return json.loads(text)
+
+    def sleep_states(self, records, start=START, end=END):
+        query = PANELS[7]["targets"][0]["expr"]
+        query = query.replace("${__from:date:iso}", start).replace("${__to:date:iso}", end)
+        fixture = json.dumps(records, separators=(",", ":"))
+        query = query.replace("stream:piyolog", (
+            'stream:piyolog | limit 1 | fields _time'
+            f" | format '{fixture}' as fixture | unroll fixture"
+            ' | unpack_json from fixture | delete fixture'
+        ), 1)
+        result = self.query(query, "stats_query", start=start, end=end, time=end)
+        self.assertEqual(result["status"], "success")
+        rows = result["data"]["result"]
+        states = {row["metric"]["state_time"]: row["metric"]["sleep_state"] for row in rows}
+        self.assertEqual(len(states), len(rows), "There must be only one state at each timestamp")
+        return states
+
+    def test_sleep_carries_state_and_splits_at_jst_boundaries(self):
+        # UTC 11:00 = JST 20:00; UTC 23:00 = JST 08:00.
+        # VictoriaLogs v1.41.1 lacks running_stats last(). The query encodes
+        # timestamp_ms * 2 + awake_bit and carries max(marker) forward across
+        # generated boundary rows. Wake wins if opposite events share a time.
+        records = [
+            event("sleep-before", 20, "Sleep", at="2026-09-19T22:00:00Z"),
+            event("wake-first", 20, "WakeUp", at="2026-09-20T00:30:00Z"),
+            event("sleep-second", 20, "Sleep", at="2026-09-20T09:00:00Z"),
+            event("sleep-second", 21, "Sleep", at="2026-09-20T10:30:00Z"),
+            event("sleep-second", 21, "Sleep", at="2026-09-20T10:30:00Z"),
+            event("wake-second", 21, "WakeUp", at="2026-09-20T23:30:00Z"),
+            event("sleep-ongoing", 21, "Sleep", at="2026-09-20T23:45:00Z"),
+        ]
+        self.assertEqual(self.sleep_states(records), {
+            START: "nap", "2026-09-20T00:30:00Z": "awake",
+            "2026-09-20T10:30:00Z": "nap", "2026-09-20T11:00:00Z": "night",
+            "2026-09-20T23:00:00Z": "nap", "2026-09-20T23:30:00Z": "awake",
+            "2026-09-20T23:45:00Z": "nap", END: "unknown",
+        })
+
+    def test_sleep_transitions_exactly_at_boundaries(self):
+        records = [
+            event("wake", 20, "WakeUp", at="2026-09-20T23:00:00Z"),
+            event("sleep", 20, "Sleep", at="2026-09-20T11:00:00Z"),
+        ]
+        self.assertEqual(self.sleep_states(records), {
+            START: "unknown", "2026-09-20T11:00:00Z": "night",
+            "2026-09-20T23:00:00Z": "awake", END: "unknown",
+        })
+
+    def test_sleep_uses_corrected_type_and_handles_missing_history(self):
+        records = [
+            event("corrected", 20, "Sleep", at="2026-09-20T02:00:00Z"),
+            event("corrected", 21, "WakeUp", at="2026-09-20T02:00:00Z"),
+        ]
+        self.assertEqual(self.sleep_states(records), {
+            START: "unknown", "2026-09-20T02:00:00Z": "awake",
+            "2026-09-20T11:00:00Z": "awake", "2026-09-20T23:00:00Z": "awake", END: "unknown",
+        })
+        self.assertTrue(all(state == "unknown" for state in self.sleep_states([]).values()))
+
+    def test_sleep_multiple_days_without_wakeup(self):
+        records = [event("sleep", 20, "Sleep", at="2026-09-19T22:00:00Z")]
+        end = "2026-09-23T00:00:00Z"
+        expected = {START: "nap", end: "unknown"}
+        for day in (20, 21, 22):
+            expected[f"2026-09-{day}T11:00:00Z"] = "night"
+            expected[f"2026-09-{day}T23:00:00Z"] = "nap"
+        self.assertEqual(self.sleep_states(records, end=end), expected)
+
+    def test_sleep_does_not_project_into_future(self):
+        records = [event("sleep", 20, "Sleep", at="2026-09-19T22:00:00Z")]
+        states = self.sleep_states(records, start="2099-01-01T00:00:00Z", end="2099-01-02T00:00:00Z")
+        self.assertTrue(states)
+        self.assertTrue(all(state == "unknown" for state in states.values()))
+
+    def test_sleep_does_not_color_beyond_generated_boundary_limit(self):
+        records = [event("sleep", 20, "Sleep", at="2000-01-01T00:00:00Z")]
+        states = self.sleep_states(records, start="2000-01-01T00:00:00Z", end="2020-01-01T00:00:00Z")
+        cutoff = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp() + 5000 * 86400
+        after_limit = [state for at, state in states.items() if datetime.fromisoformat(at.replace("Z", "+00:00")).timestamp() >= cutoff]
+        self.assertTrue(after_limit)
+        self.assertTrue(all(state == "unknown" for state in after_limit))
 
     def test_counts_use_latest_type(self):
         for panel_id, expected in ((1, 7), (2, 1), (3, 1)):

@@ -85,7 +85,7 @@
           "refId": "A"
         }
       ],
-      "title": "記録数（選択期間）",
+      "title": "記録数",
       "type": "stat"
     },
     {
@@ -141,7 +141,7 @@
           "refId": "A"
         }
       ],
-      "title": "授乳回数（選択期間）",
+      "title": "授乳回数",
       "type": "stat"
     },
     {
@@ -197,7 +197,7 @@
           "refId": "A"
         }
       ],
-      "title": "おしっこ回数（選択期間）",
+      "title": "おしっこ回数",
       "type": "stat"
     },
     {
@@ -272,7 +272,7 @@
           "refId": "A"
         }
       ],
-      "title": "離乳食（選択期間）",
+      "title": "離乳食",
       "transformations": [
         {
           "id": "labelsToFields",
@@ -431,6 +431,153 @@
         "type": "victoriametrics-logs-datasource",
         "uid": "${DS_VICTORIALOGS}"
       },
+      "description": "日本時間で20:00–08:00の睡眠は青、08:00–20:00の睡眠は赤。覚醒・不明は透明。直前の就寝／起床が次の記録まで続くと推定します。選択期間の開始前も参照し、記録漏れがあると実際とずれます。境界生成は最大5000日分で、それ以降は不明扱いです。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 100,
+            "spanNulls": false
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "night": {
+                  "color": "#5794F2",
+                  "index": 0,
+                  "text": "夜の睡眠"
+                },
+                "nap": {
+                  "color": "#F2495C",
+                  "index": 1,
+                  "text": "昼寝"
+                },
+                "awake": {
+                  "color": "rgba(0, 0, 0, 0)",
+                  "index": 2,
+                  "text": "覚醒"
+                },
+                "unknown": {
+                  "color": "rgba(0, 0, 0, 0)",
+                  "index": 3,
+                  "text": "不明"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 7,
+      "options": {
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "showValue": "never",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "options (ignore_global_time_filter=true) stream:piyolog | stats by (event_id) row_max(snapshot_at) as latest | unpack_json from latest | delete latest | filter type:in(Sleep, WakeUp) _time:[1970-01-01T00:00:00Z, ${__to:date:iso}] _time:[1970-01-01T00:00:00Z, now] | format \"0\" as awake_bit | format if (type:WakeUp) \"1\" as awake_bit | math floor(_time / 1ms) * 2 + awake_bit as marker | fields _time, marker | union (options (ignore_global_time_filter=true) * | generate_sequence 10000 | math (floor((\"${__from:date:iso}\" - 11h) / 12h) + _msg + 1) * 12h + 11h as boundary, min(\"${__to:date:iso}\", now()) as range_end | filter boundary:le_field(range_end) | format \"<time:boundary>\" as _time | fields _time) | union (options (ignore_global_time_filter=true) * | generate_sequence 1 | format \"${__from:date:iso}\" as _time | fields _time) | union (options (ignore_global_time_filter=true) * | generate_sequence 1 | math min(\"${__to:date:iso}\", now()) as range_end | format \"<time:range_end>\" as _time | format \"1\" as terminal | fields _time, terminal) | stats by (_time) max(marker) as marker, max(terminal) as terminal | running_stats max(marker) as current_marker | math current_marker % 2 as awake_bit, (_time / 1h + 9) % 24 as local_hour | format \"unknown\" as sleep_state | format if (awake_bit:=\"1\") \"awake\" as sleep_state | format if (awake_bit:=\"0\") \"night\" as sleep_state | format if (awake_bit:=\"0\" local_hour:>=8 local_hour:<20) \"nap\" as sleep_state | math _time as point_time, min(now(), \"${__from:date:iso}\" + 5000d) as current_time | format if (terminal:=\"1\" or current_time:le_field(point_time)) \"unknown\" as sleep_state | filter _time:[${__from:date:iso}, ${__to:date:iso}] | copy _time as state_time | stats by (state_time, sleep_state) count()",
+          "queryType": "stats",
+          "refId": "A"
+        }
+      ],
+      "title": "睡眠",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": [
+                "state_time",
+                "sleep_state"
+              ]
+            }
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "state_time",
+                "destinationType": "time"
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "state_time": 0,
+              "sleep_state": 1
+            },
+            "renameByName": {
+              "state_time": "Time",
+              "sleep_state": "睡眠"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Time",
+                "desc": false
+              }
+            ]
+          }
+        }
+      ],
+      "type": "state-timeline"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "${DS_VICTORIALOGS}"
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -444,7 +591,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 21
       },
       "id": 6,
       "options": {
@@ -452,7 +599,7 @@
         "enableLogDetails": true,
         "prettifyJSON": false,
         "showCommonLabels": false,
-        "showLabels": true,
+        "showLabels": false,
         "showTime": true,
         "sortOrder": "Descending",
         "wrapLogMessage": true
@@ -468,7 +615,7 @@
           "refId": "A"
         }
       ],
-      "title": "最新の記録",
+      "title": "イベント",
       "type": "logs"
     }
   ],
