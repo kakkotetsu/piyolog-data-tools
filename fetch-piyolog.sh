@@ -5,7 +5,7 @@ set -euo pipefail
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 env_file="$script_dir/.env"
 archive_dir="$script_dir/data/piyolog"
-lock_dir="$archive_dir/.fetch.lock"
+lock_file="$archive_dir/.fetch.flock"
 
 fail() {
   printf 'Error: %s\n' "$*" >&2
@@ -14,6 +14,7 @@ fail() {
 
 command -v curl >/dev/null 2>&1 || fail "curl is required."
 command -v jq >/dev/null 2>&1 || fail "jq is required."
+command -v flock >/dev/null 2>&1 || fail "flock is required (util-linux)."
 [[ -f "$env_file" ]] || fail ".env was not found."
 
 # Do not source .env: read only the values this script uses.
@@ -40,21 +41,27 @@ if [[ -n "$no_proxy" ]]; then
 fi
 
 mkdir -p "$archive_dir"
-if ! mkdir "$lock_dir" 2>/dev/null; then
+# Keep this file in place: unlinking it could let two processes lock different
+# inodes. The kernel releases the lock when this process closes descriptor 9.
+# Use a new name so a stale directory from the old lock cannot block startup.
+exec 9>>"$lock_file"
+if ! flock --nonblock 9; then
   fail "another fetch is already running."
 fi
 
 tmp_file=$(mktemp "$archive_dir/.download.XXXXXX")
 cleanup() {
   rm -f "$tmp_file"
-  rmdir "$lock_dir" 2>/dev/null || true
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 env "${curl_environment[@]}" curl --fail --silent --show-error --location \
   --connect-timeout 10 --max-time 30 \
   --output "$tmp_file" \
-  "$feed_url"
+  "$feed_url" 9>&-
 
 # Keep the response byte-for-byte intact, but reject malformed or unexpected data.
 jq -e '
