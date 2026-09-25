@@ -30,6 +30,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = PROJECT_DIR / "data" / "piyolog"
 DEFAULT_STATE_FILE = DEFAULT_DATA_DIR / "victorialogs-state.sqlite3"
 DEFAULT_VICTORIALOGS_URL = "http://127.0.0.1:9428"
+DEBUG_SAMPLE_SIZE = 5
 
 TYPE_LABELS = {
     "Pee": "おしっこ",
@@ -257,7 +258,7 @@ def pending_records(
 
 def sync_records(
     connection: sqlite3.Connection, data_dir: Path, url: str,
-    bearer_token: str | None, dry_run: bool, debug: bool,
+    bearer_token: str | None, dry_run: bool,
 ) -> None:
     """Caller must hold state_lock until this function and DB close complete."""
     latest = load_latest_records(data_dir)
@@ -270,10 +271,7 @@ def sync_records(
         return
 
     logs = [to_log_record(record, snapshot_at, source_file) for _, _, snapshot_at, source_file, record in pending]
-    post_json_lines(url, logs, bearer_token, debug)
-    if debug:
-        print("VictoriaLogs accepted the debug request; no data or sync state was stored.")
-        return
+    post_json_lines(url, logs, bearer_token, False)
 
     delivered_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     with connection:
@@ -290,6 +288,34 @@ def sync_records(
             [(url, event_id, digest, snapshot_at, source_file, delivered_at) for event_id, digest, snapshot_at, source_file, _ in pending],
         )
     print(f"Delivered {len(pending)} event(s) to VictoriaLogs.")
+
+
+def debug_records(data_dir: Path, url: str, bearer_token: str | None) -> None:
+    """Submit a small recent sample without opening or updating sync state."""
+    latest = load_latest_records(data_dir)
+    if not latest:
+        raise RuntimeError("No archived events available for debug validation; no request was sent.")
+
+    def event_order(item: tuple[dict[str, Any], str, str]) -> tuple[datetime, str]:
+        record = item[0]
+        try:
+            timestamp = datetime.fromisoformat(record["datetime"].replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                raise ValueError("Missing timezone")
+        except (KeyError, ValueError, TypeError, AttributeError) as exc:
+            raise RuntimeError("Invalid event datetime for debug sampling.") from exc
+        return timestamp, record["event_id"]
+
+    sample = sorted(latest.values(), key=event_order, reverse=True)[:DEBUG_SAMPLE_SIZE]
+    logs = [to_log_record(record, snapshot_at, source_file) for record, snapshot_at, source_file in sample]
+    print(f"Debug sample: {len(logs)} of {len(latest)} event(s), newest event datetime first; delivery state ignored.")
+    print("Warning: event contents, including memos, may appear in VictoriaLogs server logs.")
+    post_json_lines(url, logs, bearer_token, True)
+    print(
+        "VictoriaLogs accepted the debug request (HTTP success). "
+        "Check VictoriaLogs server logs for parsing details; "
+        "events were not stored as searchable logs and sync state was not changed."
+    )
 
 
 def post_json_lines(url: str, logs: list[dict[str, Any]], bearer_token: str | None, debug: bool) -> None:
@@ -325,7 +351,7 @@ def main() -> int:
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Ask VictoriaLogs to validate input without storing it; does not update sync state.",
+        help="Send up to 5 newest events with debug=1, ignoring delivery state; inspect VictoriaLogs server logs for details.",
     )
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE_FILE)
@@ -348,6 +374,9 @@ def main() -> int:
     try:
         legacy_destination = normalize_destination(args.migrate_state_url) if args.migrate_state_url is not None else None
         url = normalize_destination(url) if legacy_destination is None else legacy_destination
+        if args.debug:
+            debug_records(args.data_dir, url, bearer_token)
+            return 0
         # Resolve symlinks so alternate spellings use the same lock file.
         state_file = args.state_file.resolve()
         with state_lock(state_file):
@@ -355,7 +384,7 @@ def main() -> int:
                 if legacy_destination is not None:
                     print("Migrated legacy delivery state; original rows retained in delivered_event_legacy. No data was sent.")
                 else:
-                    sync_records(connection, args.data_dir, url, bearer_token, args.dry_run, args.debug)
+                    sync_records(connection, args.data_dir, url, bearer_token, args.dry_run)
         return 0
     except (RuntimeError, OSError, sqlite3.Error) as exc:
         print(f"Error: {exc}", file=sys.stderr)

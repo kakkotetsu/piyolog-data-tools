@@ -41,17 +41,7 @@ NO_PROXY=localhost,127.0.0.1
 
 12時間ごとなど、24時間より短い間隔で実行すると、取得範囲の境界やキャッシュによる取りこぼしを重複で補えます。
 
-### 定期実行
-
-#### cron
-
-cronを使う場合は、`crontab -e` で次の行を追加します。例中の `/home/kotetsu/piyolog-data-tools` は、このプロジェクトを置いた実際のパスに置き換えてください。
-
-```cron
-15 0,12 * * * cd /home/kotetsu/piyolog-data-tools && ./fetch-piyolog.sh >> data/piyolog/fetch.log 2>&1
-```
-
-#### systemd timer
+### 定期実行（systemd timer）
 
 同梱のuser systemd unitは、毎日00:15と12:15に取得します。停止・スリープ中に予定時刻を過ぎた場合は、次回のuser systemd起動時に1回補完します。
 
@@ -88,7 +78,11 @@ Python標準ライブラリだけで動作します。プロジェクト配下�
 .venv/bin/python sync_victorialogs.py --dry-run
 ```
 
-`--dry-run` で送信件数を確認した後、最初の1回だけ `--debug` でVictoriaLogsの受信形式を検証できます。`--debug` はVictoriaLogsへデータを送りますが保存せず、送信済み状態も更新しません。
+`--dry-run` は未送信・変更済みイベントの件数を確認します。`--debug` は送信済みかどうかに関係なく、イベントIDごとの最新版からイベント日時が新しい最大5件を `debug=1` で送信します。検索用データとしては保存せず、送信済み状態DBも参照・更新しません。検証対象が0件なら通信せずエラー終了します。
+
+`debug=1` はVictoriaLogsの取り込みAPIが提供する機能で、受信データを解析してサーバログに出力し、検索用データとしては保存しません。
+
+`--debug` の成功表示はHTTP応答の確認です。解析結果はVictoriaLogs側のログで確認してください。メモなどの内容もサーバログに出力される点に注意してください。
 
 ```bash
 .venv/bin/python sync_victorialogs.py --debug

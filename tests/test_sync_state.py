@@ -2,12 +2,14 @@
 
 from contextlib import closing, redirect_stderr, redirect_stdout
 import io
+import json
 import multiprocessing
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 import sync_victorialogs as sync
 
@@ -126,6 +128,98 @@ class SyncStateTests(unittest.TestCase):
         self.assertEqual(status, 0, output)
         post.assert_called_once()
         self.assertEqual(len(self.rows()), 1)
+
+    def test_debug_still_sends_after_all_events_are_delivered(self):
+        self.run_sync()
+        before = self.state.read_bytes()
+        status, output, post = self.run_sync(extra=("--debug",))
+        self.assertEqual(status, 0, output)
+        post.assert_called_once_with(URL_A, [sync.to_log_record(RECORD, SNAPSHOT_AT, self.snapshot.name)], None, True)
+        self.assertIn("Debug sample: 1 of 1", output)
+        self.assertIn("HTTP success", output)
+        self.assertIn("server logs", output)
+        self.assertEqual(self.state.read_bytes(), before)
+        status, output, post = self.run_sync()
+        self.assertEqual(status, 0, output)
+        post.assert_not_called()
+
+    def test_debug_selects_five_newest_events_with_latest_payloads(self):
+        records = [
+            {**RECORD, "event_id": f"event-{hour}", "datetime": f"2026-09-25T0{hour}:00:00Z"}
+            for hour in range(7)
+        ]
+        records.append({**RECORD, "event_id": "offset-event", "datetime": "2026-09-25T10:30:00+09:00"})
+        self.snapshot.write_text(sync.canonical_json({"generated_at": SNAPSHOT_AT, "records": records}))
+        (self.data / "newer.json").write_text(sync.canonical_json({
+            "generated_at": "2026-09-26T02:00:00Z",
+            "records": [{**records[6], "memo": "edited"}, {**records[0], "memo": "also edited"}],
+        }))
+        status, output, post = self.run_sync(extra=("--debug",))
+        self.assertEqual(status, 0, output)
+        post.assert_called_once()
+        logs = post.call_args.args[1]
+        self.assertEqual([row["event_id"] for row in logs], [f"event-{hour}" for hour in (6, 5, 4, 3, 2)])
+        self.assertEqual(logs[0]["memo"], "edited")
+        self.assertEqual(logs[0]["source_file"], "newer.json")
+        self.assertIn("Debug sample: 5 of 8", output)
+        self.assertFalse(self.state.exists())
+
+    def test_debug_does_not_open_state_or_create_state_directory(self):
+        state = self.project / "unused" / "state.sqlite3"
+        with patch.object(sync, "open_state", side_effect=AssertionError("Debug must not open state")):
+            status, output, post = self.run_sync(extra=("--debug", "--state-file", str(state)))
+        self.assertEqual(status, 0, output)
+        post.assert_called_once()
+        self.assertFalse(state.parent.exists())
+
+    def test_debug_works_without_migrating_legacy_state(self):
+        self.create_legacy()
+        before = self.state.read_bytes()
+        status, output, post = self.run_sync(extra=("--debug",))
+        self.assertEqual(status, 0, output)
+        post.assert_called_once()
+        self.assertEqual(self.state.read_bytes(), before)
+
+    def test_debug_no_events_is_an_error_without_request(self):
+        self.snapshot.write_text(sync.canonical_json({"generated_at": SNAPSHOT_AT, "records": []}))
+        status, output, post = self.run_sync(extra=("--debug",))
+        self.assertEqual(status, 1)
+        post.assert_not_called()
+        self.assertIn("No archived events", output)
+        self.assertIn("no request was sent", output)
+        self.assertFalse(self.state.exists())
+
+    def test_debug_failed_request_is_an_error_without_state_change(self):
+        self.run_sync()
+        before = self.state.read_bytes()
+        status, output, post = self.run_sync(extra=("--debug",), sender=RuntimeError("mock HTTP failure"))
+        self.assertEqual(status, 1)
+        post.assert_called_once()
+        self.assertNotIn("HTTP success", output)
+        self.assertEqual(self.state.read_bytes(), before)
+
+    def test_debug_invalid_event_datetime_does_not_send(self):
+        for timestamp in ("invalid", "2026-09-25T10:00:00", None):
+            with self.subTest(timestamp=timestamp):
+                self.write_snapshot({**RECORD, "datetime": timestamp})
+                status, output, post = self.run_sync(extra=("--debug",))
+                self.assertEqual(status, 1)
+                self.assertIn("Invalid event datetime", output)
+                post.assert_not_called()
+
+    def test_debug_http_parameter_and_payload(self):
+        logs = [sync.to_log_record(RECORD, SNAPSHOT_AT, self.snapshot.name)]
+        for debug in (True, False):
+            with self.subTest(debug=debug), patch.object(sync, "urlopen") as urlopen:
+                urlopen.return_value.__enter__.return_value.status = 204
+                sync.post_json_lines(URL_A, logs, None, debug)
+                request = urlopen.call_args.args[0]
+                query = parse_qs(urlsplit(request.full_url).query)
+                self.assertEqual(query.get("debug"), ["1"] if debug else None)
+                self.assertEqual(query["_time_field"], ["datetime"])
+                self.assertEqual(query["_msg_field"], ["message"])
+                self.assertEqual(urlsplit(request.full_url).path, "/insert/jsonline")
+                self.assertEqual([json.loads(line) for line in request.data.decode().splitlines()], logs)
 
     def test_legacy_state_requires_explicit_destination(self):
         self.create_legacy()
