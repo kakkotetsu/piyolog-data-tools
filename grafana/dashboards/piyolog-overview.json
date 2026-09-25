@@ -80,7 +80,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "stream:piyolog | stats count()",
+          "expr": "options (ignore_global_time_filter=true) stream:piyolog | stats by (event_id) row_max(snapshot_at) as latest | unpack_json from latest | delete latest | filter _time:[${__from:date:iso}, ${__to:date:iso}] | stats count()",
           "queryType": "stats",
           "refId": "A"
         }
@@ -136,7 +136,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "stream:piyolog type:BreastFeeding | stats count()",
+          "expr": "options (ignore_global_time_filter=true) stream:piyolog | stats by (event_id) row_max(snapshot_at) as latest | unpack_json from latest | delete latest | filter _time:[${__from:date:iso}, ${__to:date:iso}] | filter type:BreastFeeding | stats count()",
           "queryType": "stats",
           "refId": "A"
         }
@@ -192,7 +192,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "stream:piyolog type:Pee | stats count()",
+          "expr": "options (ignore_global_time_filter=true) stream:piyolog | stats by (event_id) row_max(snapshot_at) as latest | unpack_json from latest | delete latest | filter _time:[${__from:date:iso}, ${__to:date:iso}] | filter type:Pee | stats count()",
           "queryType": "stats",
           "refId": "A"
         }
@@ -267,7 +267,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "stream:piyolog type:Solid | copy _time as meal_time | stats by (event_id, meal_time, memo) count()",
+          "expr": "options (ignore_global_time_filter=true) stream:piyolog | stats by (event_id) row_max(snapshot_at) as latest | unpack_json from latest | delete latest | filter _time:[${__from:date:iso}, ${__to:date:iso}] | filter type:Solid | copy _time as meal_time | stats by (event_id, meal_time, memo) count()",
           "queryType": "stats",
           "refId": "A"
         }
@@ -384,12 +384,46 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "stream:piyolog type:Temperature | stats by (_time:1h) max(value_value)",
-          "queryType": "statsRange",
+          "expr": "options (ignore_global_time_filter=true) stream:piyolog | stats by (event_id) row_max(snapshot_at) as latest | unpack_json from latest | delete latest | filter _time:[${__from:date:iso}, ${__to:date:iso}] | filter type:Temperature | copy _time as temperature_time | stats by (temperature_time:1h) max(value_value) as temperature | format \"<temperature>\" as temperature_value",
+          "queryType": "stats",
           "refId": "A"
         }
       ],
       "title": "体温",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": { "mode": "columns" }
+        },
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": { "include": { "names": ["temperature_time", "temperature_value"] } }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              { "targetField": "temperature_time", "destinationType": "time" },
+              { "targetField": "temperature_value", "destinationType": "number" }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": { "temperature_time": 0, "temperature_value": 1 },
+            "renameByName": { "temperature_time": "Time", "temperature_value": "体温" }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": { "sort": [{ "field": "Time", "desc": false }] }
+        }
+      ],
       "type": "timeseries"
     },
     {
@@ -428,7 +462,7 @@
         {
           "direction": "desc",
           "editorMode": "code",
-          "expr": "stream:piyolog",
+          "expr": "options (ignore_global_time_filter=true) stream:piyolog | stats by (event_id) row_max(snapshot_at) as latest | unpack_json from latest | delete latest | filter _time:[${__from:date:iso}, ${__to:date:iso}] | sort by (_time desc) | limit 100",
           "maxLines": 100,
           "queryType": "instant",
           "refId": "A"
