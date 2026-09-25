@@ -3,23 +3,26 @@
 
 The archive JSON files remain the source of truth.  This script chooses the
 newest snapshot for every event_id and stores the last delivered payload hash
-in a local SQLite database, so unchanged events aren't sent repeatedly.
+per destination in a local SQLite database. A process lock protects the full
+read/send/update cycle against overlapping timer and manual runs.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import sqlite3
 import sys
 from collections import Counter
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -152,36 +155,141 @@ def load_latest_records(data_dir: Path) -> dict[str, tuple[dict[str, Any], str, 
     return latest
 
 
-def open_state(path: Path) -> sqlite3.Connection:
+def normalize_destination(url: str) -> str:
+    """Use the same canonical base URL for delivery and state lookup."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+        host = parts.hostname
+        if (
+            parts.scheme not in {"http", "https"}
+            or not host
+            or parts.username is not None
+            or parts.password is not None
+            or parts.query
+            or parts.fragment
+            or any(character.isspace() or ord(character) < 32 for character in url)
+        ):
+            raise ValueError
+    except ValueError as exc:
+        raise RuntimeError("Invalid VictoriaLogs base URL; use HTTP(S) without credentials, query or fragment.") from exc
+    authority = f"[{host}]" if ":" in host else host
+    if port is not None and port != {"http": 80, "https": 443}[parts.scheme]:
+        authority += f":{port}"
+    return urlunsplit((parts.scheme, authority, parts.path.rstrip("/"), "", ""))
+
+
+@contextmanager
+def state_lock(path: Path) -> Iterator[None]:
+    """Serialize runs sharing a state DB; never unlink the persistent lock file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with os.fdopen(os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600), "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("Another VictoriaLogs sync is already running for this state file.") from exc
+        yield
+
+
+def open_state(path: Path, legacy_destination: str | None = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS delivered_event (
-            event_id TEXT PRIMARY KEY,
-            payload_hash TEXT NOT NULL,
-            snapshot_at TEXT NOT NULL,
-            source_file TEXT NOT NULL,
-            delivered_at TEXT NOT NULL
-        )
-        """
-    )
+    try:
+        with connection:
+            # Explicit BEGIN also makes the schema migration atomic.
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(delivered_event)")}
+            legacy = bool(columns) and "destination_url" not in columns
+            if legacy and legacy_destination is None:
+                raise RuntimeError(
+                    "Legacy sync state has no destination. Run once with "
+                    "--migrate-state-url <previous VictoriaLogs base URL> before syncing."
+                )
+            if legacy_destination is not None and not legacy:
+                raise RuntimeError("No legacy sync state to migrate; the state is new or already migrated.")
+            if legacy:
+                connection.execute("ALTER TABLE delivered_event RENAME TO delivered_event_legacy")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS delivered_event (
+                    destination_url TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    snapshot_at TEXT NOT NULL,
+                    source_file TEXT NOT NULL,
+                    delivered_at TEXT NOT NULL,
+                    PRIMARY KEY (destination_url, event_id)
+                )
+                """
+            )
+            if legacy:
+                connection.execute(
+                    """
+                    INSERT INTO delivered_event
+                    SELECT ?, event_id, payload_hash, snapshot_at, source_file, delivered_at
+                    FROM delivered_event_legacy
+                    """,
+                    (legacy_destination,),
+                )
+    except Exception:
+        connection.close()
+        raise
     return connection
 
 
 def pending_records(
     connection: sqlite3.Connection,
     latest: dict[str, tuple[dict[str, Any], str, str]],
+    destination: str,
 ) -> list[tuple[str, str, str, str, dict[str, Any]]]:
     pending = []
     for event_id, (record, snapshot_at, source_file) in latest.items():
         digest = payload_hash(record)
         row = connection.execute(
-            "SELECT payload_hash FROM delivered_event WHERE event_id = ?", (event_id,)
+            "SELECT payload_hash FROM delivered_event WHERE destination_url = ? AND event_id = ?",
+            (destination, event_id),
         ).fetchone()
         if row is None or row[0] != digest:
             pending.append((event_id, digest, snapshot_at, source_file, record))
     return sorted(pending, key=lambda item: (item[4]["datetime"], item[0]))
+
+
+def sync_records(
+    connection: sqlite3.Connection, data_dir: Path, url: str,
+    bearer_token: str | None, dry_run: bool, debug: bool,
+) -> None:
+    """Caller must hold state_lock until this function and DB close complete."""
+    latest = load_latest_records(data_dir)
+    pending = pending_records(connection, latest, url)
+    type_counts = Counter(record[4].get("type", "Unknown") for record in pending)
+    print(f"Latest events: {len(latest)}; pending delivery: {len(pending)}")
+    if type_counts:
+        print("Pending by type: " + ", ".join(f"{name}={count}" for name, count in sorted(type_counts.items())))
+    if not pending or dry_run:
+        return
+
+    logs = [to_log_record(record, snapshot_at, source_file) for _, _, snapshot_at, source_file, record in pending]
+    post_json_lines(url, logs, bearer_token, debug)
+    if debug:
+        print("VictoriaLogs accepted the debug request; no data or sync state was stored.")
+        return
+
+    delivered_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    with connection:
+        connection.executemany(
+            """
+            INSERT INTO delivered_event (destination_url, event_id, payload_hash, snapshot_at, source_file, delivered_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(destination_url, event_id) DO UPDATE SET
+                payload_hash = excluded.payload_hash,
+                snapshot_at = excluded.snapshot_at,
+                source_file = excluded.source_file,
+                delivered_at = excluded.delivered_at
+            """,
+            [(url, event_id, digest, snapshot_at, source_file, delivered_at) for event_id, digest, snapshot_at, source_file, _ in pending],
+        )
+    print(f"Delivered {len(pending)} event(s) to VictoriaLogs.")
 
 
 def post_json_lines(url: str, logs: list[dict[str, Any]], bearer_token: str | None, debug: bool) -> None:
@@ -222,54 +330,36 @@ def main() -> int:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE_FILE)
     parser.add_argument("--url", help="VictoriaLogs base URL; overrides VICTORIALOGS_URL.")
+    parser.add_argument(
+        "--migrate-state-url",
+        metavar="PREVIOUS_URL",
+        help="Bind legacy delivery state to its previous base URL and exit without sending data.",
+    )
     args = parser.parse_args()
     if args.dry_run and args.debug:
         parser.error("--dry-run and --debug cannot be used together")
+    if args.migrate_state_url is not None and (args.dry_run or args.debug or args.url):
+        parser.error("--migrate-state-url cannot be combined with --url, --dry-run or --debug")
 
     env_file = PROJECT_DIR / ".env"
     apply_proxy_settings(env_file)
     url = args.url or read_env_value("VICTORIALOGS_URL", env_file) or DEFAULT_VICTORIALOGS_URL
     bearer_token = read_env_value("VICTORIALOGS_BEARER_TOKEN", env_file)
     try:
-        latest = load_latest_records(args.data_dir)
-        connection = open_state(args.state_file)
-        with connection:
-            pending = pending_records(connection, latest)
-        type_counts = Counter(record[4].get("type", "Unknown") for record in pending)
-        print(f"Latest events: {len(latest)}; pending delivery: {len(pending)}")
-        if type_counts:
-            print("Pending by type: " + ", ".join(f"{name}={count}" for name, count in sorted(type_counts.items())))
-        if not pending or args.dry_run:
-            return 0
-
-        logs = [to_log_record(record, snapshot_at, source_file) for _, _, snapshot_at, source_file, record in pending]
-        post_json_lines(url, logs, bearer_token, args.debug)
-        if args.debug:
-            print("VictoriaLogs accepted the debug request; no data or sync state was stored.")
-            return 0
-
-        delivered_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        with connection:
-            connection.executemany(
-                """
-                INSERT INTO delivered_event (event_id, payload_hash, snapshot_at, source_file, delivered_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(event_id) DO UPDATE SET
-                    payload_hash = excluded.payload_hash,
-                    snapshot_at = excluded.snapshot_at,
-                    source_file = excluded.source_file,
-                    delivered_at = excluded.delivered_at
-                """,
-                [(event_id, digest, snapshot_at, source_file, delivered_at) for event_id, digest, snapshot_at, source_file, _ in pending],
-            )
-        print(f"Delivered {len(pending)} event(s) to VictoriaLogs.")
+        legacy_destination = normalize_destination(args.migrate_state_url) if args.migrate_state_url is not None else None
+        url = normalize_destination(url) if legacy_destination is None else legacy_destination
+        # Resolve symlinks so alternate spellings use the same lock file.
+        state_file = args.state_file.resolve()
+        with state_lock(state_file):
+            with closing(open_state(state_file, legacy_destination)) as connection:
+                if legacy_destination is not None:
+                    print("Migrated legacy delivery state; original rows retained in delivered_event_legacy. No data was sent.")
+                else:
+                    sync_records(connection, args.data_dir, url, bearer_token, args.dry_run, args.debug)
         return 0
-    except RuntimeError as exc:
+    except (RuntimeError, OSError, sqlite3.Error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    finally:
-        if "connection" in locals():
-            connection.close()
 
 
 if __name__ == "__main__":

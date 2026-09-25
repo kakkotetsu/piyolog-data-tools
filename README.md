@@ -70,11 +70,11 @@ journalctl --user -u piyolog-fetch.service
 ## 2. VictoriaLogs連携
 
 データをVictoriaLogsに連携する機能です。  
-`sync_victorialogs.py` は保存済みJSONからイベントIDごとに最も新しいスナップショットを選び、新規または内容が変化したイベントだけをVictoriaLogsのJSON Lines APIへ送信します。送信済み状態は `data/piyolog/victorialogs-state.sqlite3` に保存します。
+`sync_victorialogs.py` は保存済みJSONからイベントIDごとに最も新しいスナップショットを選び、新規または内容が変化したイベントだけをVictoriaLogsのJSON Lines APIへ送信します。送信済み状態は接続先URLごとに `data/piyolog/victorialogs-state.sqlite3` に保存します。別のURLへ切り替えるとその宛先へ未送信のイベントを送り、元のURLへ戻すと以前の送信済み状態を使います（末尾の `/`、ホスト名の大文字・小文字、既定ポートの表記差は同一視します）。
 
 ### 設定
 
-VictoriaLogsの接続先を `.env` に追加します。ローカルのDocker Compose構成では、指定しなければ既定値の `http://127.0.0.1:9428` を使います。
+VictoriaLogsの接続先を `.env` に追加します。指定しなければデフォルトの `http://127.0.0.1:9428` を使います。
 
 ```dotenv
 VICTORIALOGS_URL=http://127.0.0.1:9428
@@ -96,6 +96,8 @@ Python標準ライブラリだけで動作します。プロジェクト配下�
 ```
 
 通常実行が成功した後は、未送信または変更されたイベントだけが送信されます。通信失敗時は送信済み状態を更新しないため、次回に再送されます。
+
+同じ状態DBを使う同期処理は、標準ライブラリの `fcntl.flock` で同時実行を防止します。実行中に別の同期を開始するとエラーで終了します。DBの隣に残る `.lock` ファイルは削除しないでください。別の `--state-file` を使う実行同士は排他されません。また、送信成功後に状態を保存する前に停止した場合など、再送による重複は起こり得ます。
 
 ### 定期実行（systemd timer）
 
