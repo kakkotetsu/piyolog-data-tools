@@ -25,6 +25,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
+from piyolog.archive import load_latest_records
+
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = PROJECT_DIR / "data" / "piyolog"
@@ -132,28 +134,6 @@ def to_log_record(record: dict[str, Any], snapshot_at: str, source_file: str) ->
         if key not in {"event_id", "datetime", "type"}:
             flatten(value, key, log_record)
     return log_record
-
-
-def load_latest_records(data_dir: Path) -> dict[str, tuple[dict[str, Any], str, str]]:
-    latest: dict[str, tuple[dict[str, Any], str, str]] = {}
-    for json_file in sorted(data_dir.glob("*.json")):
-        try:
-            snapshot = json.loads(json_file.read_text(encoding="utf-8"))
-            generated_at = snapshot["generated_at"]
-            records = snapshot["records"]
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
-            raise RuntimeError(f"Cannot read a Piyolog feed snapshot: {json_file.name}") from exc
-        if not isinstance(generated_at, str) or not isinstance(records, list):
-            raise RuntimeError(f"Invalid Piyolog feed snapshot: {json_file.name}")
-        for record in records:
-            if not isinstance(record, dict) or not isinstance(record.get("event_id"), str):
-                raise RuntimeError(f"Invalid event in snapshot: {json_file.name}")
-            candidate = (record, generated_at, json_file.name)
-            previous = latest.get(record["event_id"])
-            # generated_at is RFC3339 UTC, so lexical ordering is chronological.
-            if previous is None or (generated_at, json_file.name) >= (previous[1], previous[2]):
-                latest[record["event_id"]] = candidate
-    return latest
 
 
 def normalize_destination(url: str) -> str:

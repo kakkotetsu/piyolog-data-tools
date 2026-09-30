@@ -1,0 +1,25 @@
+# Copy to ../advisor.toml and edit locally. Never commit the real profile.
+[child]
+birth_date = "YYYY-MM-DD"
+# Optional: expected due date used to calculate corrected age.
+# corrected_birth_date = "YYYY-MM-DD"
+
+[analysis]
+days = 14
+timezone = "Asia/Tokyo"
+focus = ["睡眠と生活リズム", "離乳食と授乳", "保護者の負担"]
+# This text IS included in the LLM request. Omit names and other identifiers.
+context = ""
+
+[privacy]
+# Set true only after reviewing the local --dry-run request and deciding to send.
+allow_external_llm = false
+send_event_details = false
+send_memos = false
+
+[llm]
+# This budget includes reasoning tokens as well as visible output.
+max_output_tokens = 8192
+timeout_seconds = 120
+# Optional; supported values depend on your router and model.
+# reasoning_effort = "medium"
